@@ -1,8 +1,17 @@
+# app.py
+# Main entry point — imports everything from separate modules
+# This file should stay SHORT. Add features in the other files.
+
 import gradio as gr
 import numpy as np
 import tensorflow as tf
 from PIL import Image
-import requests
+
+from disease_info  import SIMPLE_INFO, SEVERITY_CONFIG
+from weather       import get_weather, get_treatment_timing, build_weather_html
+from history       import add_to_history, get_history_html
+from ui_components import (CSS, JS_VOICE,
+                            build_error_html, build_healthy_html, build_disease_html)
 
 # ==============================================================
 #  MODEL LOADING
@@ -10,63 +19,12 @@ import requests
 MODEL_PATH = "plant_disease_model_final.h5"
 disease_model = tf.keras.models.load_model(MODEL_PATH)
 
-# ImageNet validator
 validator_model = tf.keras.applications.MobileNetV2(
     weights="imagenet", include_top=True, input_shape=(224, 224, 3)
 )
 
 # ==============================================================
-#  ImageNet words that mean plant / leaf / nature
-# ==============================================================
-PLANT_KEYWORDS = {
-    "leaf", "plant", "tree", "flower", "herb", "fern", "moss",
-    "vegetable", "cabbage", "broccoli", "cauliflower", "cucumber",
-    "corn", "artichoke", "mushroom", "fungus", "strawberry", "orange",
-    "lemon", "fig", "pineapple", "banana", "apple", "grape",
-    "pomegranate", "acorn", "rapeseed", "daisy", "bud", "petal",
-    "vine", "shrub", "bush", "weed", "algae", "lichen", "hip",
-    "buckeye", "clover", "thistle", "bramble", "dandelion", "grass",
-    "reed", "horsetail", "liverwort", "watercress", "seaweed", "kelp",
-    "cactus", "succulent", "agave", "aloe", "bamboo", "palm",
-    "foliage", "frond", "stalk", "stem", "sprout", "seedling",
-    "sapling", "groundsel", "sorrel", "dock", "nettle", "spurge",
-    "plantain", "chickweed", "bindweed", "conifer", "hardwood",
-}
-
-# ==============================================================
-#  STRICT LEAF VALIDATOR
-#  Only ImageNet decides. No override. Period.
-#  - Run image through ImageNet MobileNetV2
-#  - Check top-5 predicted labels against PLANT_KEYWORDS
-#  - If NONE match → reject with what was detected
-#  - If ANY match → proceed to disease model
-# ==============================================================
-def check_is_leaf(image: Image.Image) -> tuple:
-    """Returns (is_leaf: bool, message: str)"""
-    img = image.resize((224, 224)).convert("RGB")
-    arr = tf.keras.applications.mobilenet_v2.preprocess_input(
-        np.array(img, dtype="float32")
-    )
-    preds = validator_model.predict(np.expand_dims(arr, 0), verbose=0)
-    top5 = tf.keras.applications.mobilenet_v2.decode_predictions(preds, top=5)[0]
-    # top5 = [(id, label, confidence), ...]
-
-    for _, label, conf in top5:
-        words = label.lower().replace("_", " ").split()
-        if any(w in PLANT_KEYWORDS for w in words):
-            return True, f"Plant detected: {label} ({conf*100:.1f}%)"
-
-    # None of top-5 are plants — build a helpful rejection message
-    top_label = top5[0][1].replace("_", " ")
-    top_conf  = top5[0][2] * 100
-    return False, (
-        f"Detected as **'{top_label}'** ({top_conf:.0f}% confidence) — not a plant leaf.\n\n"
-        f"Top-5 predictions: {', '.join(l.replace('_',' ') for _,l,_ in top5)}"
-    )
-
-
-# ==============================================================
-#  CLASS NAMES  (38 PlantVillage classes)
+#  CLASS NAMES
 # ==============================================================
 CLASS_NAMES = [
     "Apple___Apple_scab", "Apple___Black_rot", "Apple___Cedar_apple_rust",
@@ -88,170 +46,173 @@ CLASS_NAMES = [
 ]
 
 # ==============================================================
-#  DISEASE INFORMATION DATABASE
+#  LEAF VALIDATOR
 # ==============================================================
-DISEASE_INFO = {
-    "Apple___Apple_scab": {"cause": "Fungus - Venturia inaequalis", "region": "North India (Himachal Pradesh, J&K)", "season": "Spring to early summer", "cure": "Spray Mancozeb or Carbendazim fungicide", "base_days": 8},
-    "Apple___Black_rot": {"cause": "Fungus - Botryosphaeria obtusa", "region": "North India", "season": "Summer-Monsoon", "cure": "Spray Captan or Mancozeb; remove mummified fruits", "base_days": 12},
-    "Apple___Cedar_apple_rust": {"cause": "Fungus - Gymnosporangium juniperi-virginianae", "region": "Himalayan region", "season": "Spring", "cure": "Spray Myclobutanil; remove nearby juniper hosts", "base_days": 10},
-    "Tomato___Late_blight": {"cause": "Oomycete - Phytophthora infestans", "region": "North India", "season": "Monsoon", "cure": "Spray Metalaxyl + Mancozeb; remove infected plants", "base_days": 5},
-    "Tomato___Early_blight": {"cause": "Fungus - Alternaria solani", "region": "All regions", "season": "Summer-Monsoon", "cure": "Spray Mancozeb; ensure proper plant spacing", "base_days": 10},
-    "Potato___Late_blight": {"cause": "Oomycete - Phytophthora infestans", "region": "North India", "season": "Monsoon", "cure": "Spray Metalaxyl + Mancozeb; destroy infected tubers", "base_days": 5},
-    "Potato___Early_blight": {"cause": "Fungus - Alternaria solani", "region": "All regions", "season": "Summer", "cure": "Spray Chlorothalonil or Mancozeb", "base_days": 10},
-    "Corn_(maize)___Common_rust_": {"cause": "Fungus - Puccinia sorghi", "region": "All maize-growing regions", "season": "Monsoon", "cure": "Spray Propiconazole; use resistant varieties", "base_days": 10},
-    "Tomato___Bacterial_spot": {"cause": "Bacterium - Xanthomonas spp.", "region": "All regions", "season": "Warm wet season", "cure": "Spray copper-based bactericide; avoid overhead irrigation", "base_days": 7},
-    "default": {"cause": "Pathogen details not available", "region": "India", "season": "Monsoon", "cure": "Consult your local agriculture extension officer", "base_days": 10},
+PLANT_KEYWORDS = {
+    "leaf", "plant", "tree", "flower", "herb", "fern", "moss",
+    "vegetable", "cabbage", "broccoli", "cauliflower", "cucumber",
+    "corn", "artichoke", "mushroom", "fungus", "strawberry", "orange",
+    "lemon", "fig", "pineapple", "banana", "apple", "grape",
+    "pomegranate", "acorn", "rapeseed", "daisy", "bud", "petal",
+    "vine", "shrub", "bush", "weed", "algae", "lichen", "hip",
+    "buckeye", "clover", "thistle", "bramble", "dandelion", "grass",
+    "reed", "horsetail", "liverwort", "watercress", "seaweed", "kelp",
+    "cactus", "succulent", "agave", "aloe", "bamboo", "palm",
+    "foliage", "frond", "stalk", "stem", "sprout", "seedling",
+    "sapling", "groundsel", "sorrel", "dock", "nettle", "spurge",
+    "plantain", "chickweed", "bindweed", "conifer", "hardwood",
 }
 
-IMG_SIZE = (224, 224)
-
-# ==============================================================
-#  WEATHER HELPER
-# ==============================================================
-def get_weather(city: str, api_key: str):
-    try:
-        url = (
-            f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/"
-            f"timeline/{city}?unitGroup=metric&key={api_key}&contentType=json"
-        )
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            return None
-        today = resp.json()["days"][0]
-        return {
-            "temp": today["temp"],
-            "humidity": today["humidity"],
-            "description": today["conditions"],
-            "rain": today["precip"] > 0,
-        }
-    except Exception:
-        return None
-
-
-def treatment_timing(disease_name: str, weather) -> str:
-    info = DISEASE_INFO.get(disease_name, DISEASE_INFO["default"])
-    base = info["base_days"]
-    if weather is None:
-        return f"Spray within {base} days (weather data unavailable)."
-    h, rain = weather["humidity"], weather["rain"]
-    if "Late_blight" in disease_name and (rain or h > 85):
-        return "VERY URGENT - spray within 2-3 days (high humidity / rain detected)."
-    if rain and h > 80:
-        return f"Spray within {max(base - 4, 1)} days (rain + high humidity)."
-    if h > 85:
-        return f"Spray within {max(base - 3, 1)} days (high humidity)."
-    return f"Spray within {base} days (moderate weather)."
-
+def check_is_leaf(image: Image.Image) -> tuple:
+    img = image.resize((224, 224)).convert("RGB")
+    arr = tf.keras.applications.mobilenet_v2.preprocess_input(
+        np.array(img, dtype="float32")
+    )
+    preds = validator_model.predict(np.expand_dims(arr, 0), verbose=0)
+    top5  = tf.keras.applications.mobilenet_v2.decode_predictions(preds, top=5)[0]
+    for _, label, conf in top5:
+        if any(w in PLANT_KEYWORDS for w in label.lower().replace("_", " ").split()):
+            return True, label
+    top_label = top5[0][1].replace("_", " ")
+    top_conf  = top5[0][2] * 100
+    return False, f"'{top_label}' ({top_conf:.0f}%)"
 
 # ==============================================================
 #  MAIN PREDICT FUNCTION
 # ==============================================================
 def predict(image: Image.Image, city: str, api_key: str):
     if image is None:
-        return "Please upload or capture a leaf image.", None
+        return (build_error_html("Please upload or capture a leaf image first! 📸"),
+                "", get_history_html())
 
-    # ── Step 1: Strict ImageNet leaf check ──────────────────────
-    is_leaf, msg = check_is_leaf(image)
+    # Leaf validation
+    is_leaf, reason = check_is_leaf(image)
     if not is_leaf:
         return (
-            "**This is not a plant leaf image.**\n\n"
-            + msg + "\n\n"
-            "Please upload a **clear photo of a plant leaf** "
-            "(tomato, apple, potato, corn, grape, etc.).\n"
-            "You can also use the **Webcam** tab to capture a leaf live."
-        ), None
+            build_error_html(
+                f"❌ This is not a plant leaf!\n\nDetected as: {reason}\n\n"
+                "Please upload a clear photo of a plant leaf 🌿"
+            ), "", get_history_html()
+        )
 
-    # ── Step 2: Disease prediction ───────────────────────────────
-    img = image.resize(IMG_SIZE)
-    arr = np.array(img.convert("RGB"), dtype="float32") / 255.0
-    arr = np.expand_dims(arr, 0)
-    preds = disease_model.predict(arr, verbose=0)[0]
-    top3_idx = np.argsort(preds)[-3:][::-1]
+    # Disease prediction
+    arr  = np.array(image.resize((224, 224)).convert("RGB"), dtype="float32") / 255.0
+    preds = disease_model.predict(np.expand_dims(arr, 0), verbose=0)[0]
+    top_idx  = int(np.argmax(preds))
+    top_name = CLASS_NAMES[top_idx]
+    top_conf = float(preds[top_idx]) * 100
 
-    # ── Step 3: Weather ──────────────────────────────────────────
-    weather = None
-    weather_line = "Weather: not fetched (no city/API key provided)."
+    # Weather
+    weather      = None
+    weather_html = ""
     if city.strip() and api_key.strip():
-        weather = get_weather(city.strip(), api_key.strip())
-        if weather:
-            weather_line = (
-                f"Weather: {city} - {weather['temp']}C, "
-                f"Humidity {weather['humidity']}%, {weather['description']}"
-            )
-        else:
-            weather_line = "Weather fetch failed. Check city name or API key."
+        weather      = get_weather(city.strip(), api_key.strip())
+        weather_html = build_weather_html(city.strip(), weather)
 
-    # ── Step 4: Build output ─────────────────────────────────────
-    lines = [weather_line, ""]
-    for rank, i in enumerate(top3_idx, 1):
-        name   = CLASS_NAMES[i]
-        conf   = preds[i] * 100
-        info   = DISEASE_INFO.get(name, DISEASE_INFO["default"])
-        timing = treatment_timing(name, weather)
-        if "healthy" in name.lower():
-            lines.append(f"**{rank}. {name}** - {conf:.1f}% Plant is healthy!")
-        else:
-            lines.append(
-                f"**{rank}. {name}** - {conf:.1f}%\n"
-                f"   Cause   : {info['cause']}\n"
-                f"   Region  : {info['region']}\n"
-                f"   Season  : {info['season']}\n"
-                f"   Cure    : {info['cure']}\n"
-                f"   Timing  : {timing}"
-            )
-        lines.append("")
+    is_healthy = "healthy" in top_name.lower()
 
-    label_dict = {CLASS_NAMES[i]: float(preds[i]) for i in top3_idx}
-    return "\n".join(lines), label_dict
+    if is_healthy:
+        plant_name   = top_name.split("___")[0]
+        result_html  = build_healthy_html(plant_name, top_conf, weather_html)
+        voice_text   = f"Good news! Your {plant_name} plant is healthy with {top_conf:.0f} percent confidence."
+        emoji        = "✅"
+    else:
+        info         = SIMPLE_INFO.get(top_name, SIMPLE_INFO["default"])
+        sev          = SEVERITY_CONFIG[info["severity"]]
+        timing       = get_treatment_timing(top_name, weather, info["base_days"])
+        result_html  = build_disease_html(
+            top_name, top_conf, info,
+            sev["label"], sev["emoji"], timing, weather_html
+        )
+        voice_text   = (
+            f"Alert! Your plant has {info['simple_name']} with {top_conf:.0f} percent confidence. "
+            f"{info['simple_cause']} "
+            + " ".join(info["simple_cure_steps"])
+        )
+        emoji = info["emoji"]
+
+    add_to_history(top_name, top_conf, is_healthy, emoji)
+    return result_html, voice_text, get_history_html()
 
 
 # ==============================================================
 #  GRADIO UI
 # ==============================================================
-with gr.Blocks(title="Leaf Disease Predictor") as demo:
-    gr.Markdown(
-        """
-        # Plant Leaf Disease Prediction
-        Upload a **plant leaf photo** or use your **webcam** to capture one live.
-        > Model: MobileNetV2 fine-tuned on PlantVillage (38 classes)
-        """
-    )
+with gr.Blocks(css=CSS, title="🌿 Leaf Disease Predictor") as demo:
+
+    gr.HTML("""
+    <div class='main-header'>
+        <h1>🌿 Leaf Disease Predictor</h1>
+        <p>Upload a leaf photo → Get instant disease detection + simple cure guide</p>
+        <p style='font-size:0.85rem;opacity:0.8;'>
+            पत्ती की फोटो डालें → रोग पहचान + इलाज की जानकारी पाएं
+        </p>
+    </div>
+    """)
+
+    voice_state = gr.State("")
+
     with gr.Row():
         with gr.Column(scale=1):
+            gr.HTML("<div class='section-label'>📸 Step 1: Upload or Capture Leaf</div>")
             img_input = gr.Image(
-                type="pil",
-                label="Leaf Image",
+                type="pil", label="Leaf Image",
                 sources=["upload", "webcam", "clipboard"],
             )
-            city_input = gr.Textbox(
-                label="City (for weather - optional)",
-                placeholder="e.g. Patna",
-            )
-            api_input = gr.Textbox(
-                label="Visual Crossing API Key (optional)",
-                placeholder="Paste your free API key here",
+            gr.HTML("<div class='section-label'>🌤️ Step 2: Add Weather Info (Optional)</div>")
+            city_input = gr.Textbox(label="Your City Name", placeholder="e.g. Patna, Delhi, Mumbai")
+            api_input  = gr.Textbox(
+                label="Weather API Key (optional)",
+                placeholder="Paste Visual Crossing API key for weather advice",
                 type="password",
             )
-            submit_btn = gr.Button("Predict", variant="primary")
+            gr.HTML("<div class='section-label'>🔍 Step 3: Get Results</div>")
+            submit_btn = gr.Button("🔍 Analyse My Leaf", variant="primary", elem_classes=["predict-btn"])
+            voice_btn  = gr.Button("🔊 Read Result Aloud", elem_classes=["voice-btn"])
 
         with gr.Column(scale=1):
-            text_out  = gr.Markdown(label="Result")
-            label_out = gr.Label(num_top_classes=3, label="Top-3 Confidence", show_label=True)
+            gr.HTML("<div class='section-label'>📋 Result</div>")
+            result_out = gr.HTML(
+                value="<div class='no-history' style='padding:3rem;'>"
+                      "Upload a leaf photo and click Analyse 🌿</div>"
+            )
+            voice_text_box = gr.Textbox(visible=False)
+
+    with gr.Row():
+        with gr.Column():
+            gr.HTML("<div class='section-label'>🕐 Recent Predictions</div>")
+            history_out = gr.HTML(value=get_history_html())
+
+    with gr.Row():
+        with gr.Column():
+            gr.HTML("""
+            <div class='section-card' style='margin-top:1rem;'>
+                <div class='section-title'>📖 How to use this app?</div>
+                <ol class='cure-steps'>
+                    <li>Take a clear photo of the <b>leaf</b> (not the whole plant)</li>
+                    <li>Make sure the leaf is <b>well-lit</b> — natural sunlight is best</li>
+                    <li>The leaf should <b>fill most of the photo</b></li>
+                    <li>Click <b>"Analyse My Leaf"</b> button</li>
+                    <li>Read the result and follow the <b>step-by-step cure guide</b></li>
+                    <li>Click <b>"Read Result Aloud"</b> to hear the result spoken</li>
+                </ol>
+                <div class='hindi-text'>
+                    पत्ती की साफ फोटो लें → "Analyse My Leaf" दबाएं → इलाज की जानकारी पाएं
+                </div>
+            </div>
+            """)
 
     submit_btn.click(
         fn=predict,
         inputs=[img_input, city_input, api_input],
-        outputs=[text_out, label_out],
+        outputs=[result_out, voice_text_box, history_out],
     )
-    gr.Markdown(
-        """
-        ---
-        **Tips:**
-        - Use **Upload** for saved photos | **Webcam** to capture live
-        - Non-leaf images (people, cars, screenshots) are automatically rejected
-        - Get a free weather API key at [visualcrossing.com](https://www.visualcrossing.com/sign-up)
-        """
+    voice_btn.click(
+        fn=None,
+        inputs=[voice_text_box],
+        js="(text) => speakResult(text)",
     )
+    gr.HTML(f"<script>{JS_VOICE}</script>")
 
 if __name__ == "__main__":
     demo.launch()
