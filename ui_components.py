@@ -94,7 +94,6 @@ body, .gradio-container {
     background:#fffbeb; border-radius:12px; padding:0.8rem 1rem; margin:0.8rem 0;
     color:#92400e; font-size:0.95rem; border-left:4px solid #f59e0b;
 }
-.hindi-text { color:#6b7280; font-size:0.9rem; margin-top:0.5rem; font-style:italic; }
 
 .healthy-message {
     background:white; border-radius:12px; padding:1rem; margin:0.8rem 0;
@@ -208,7 +207,6 @@ def build_healthy_html(plant_name: str, conf: float, weather_html: str) -> str:
             🌱 Keep watering regularly and ensure good sunlight.<br>
             🔍 Check again in 2 weeks to make sure it stays healthy.
         </div>
-        <div class='hindi-text'>आपका पौधा स्वस्थ है! ऐसे ही देखभाल करते रहें। 🌱</div>
     </div>"""
 
 
@@ -231,7 +229,6 @@ def build_disease_html(disease_name: str, conf: float, info: dict,
         <div class='section-card'>
             <div class='section-title'>🔬 What is this disease?</div>
             <div class='section-body'>{info['simple_cause']}</div>
-            <div class='hindi-text'>{info['hindi']}</div>
         </div>
         <div class='section-card'>
             <div class='section-title'>💊 How to cure — Step by Step</div>
