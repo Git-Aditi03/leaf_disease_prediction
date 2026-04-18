@@ -61,6 +61,8 @@ PLANT_KEYWORDS = {
     "foliage", "frond", "stalk", "stem", "sprout", "seedling",
     "sapling", "groundsel", "sorrel", "dock", "nettle", "spurge",
     "plantain", "chickweed", "bindweed", "conifer", "hardwood",
+    "cardoon", "bolete", "agaric", "gyromitra",
+    "earthstar", "coral", "hen", "pot",
 }
 
 def check_is_leaf(image: Image.Image) -> tuple:
@@ -73,6 +75,9 @@ def check_is_leaf(image: Image.Image) -> tuple:
     for _, label, conf in top5:
         if any(w in PLANT_KEYWORDS for w in label.lower().replace("_", " ").split()):
             return True, label
+    # If model is unsure (low confidence), give benefit of the doubt
+    if top5[0][2] < 0.60:
+        return True, "uncertain"
     top_label = top5[0][1].replace("_", " ")
     top_conf  = top5[0][2] * 100
     return False, f"'{top_label}' ({top_conf:.0f}%)"
@@ -96,7 +101,7 @@ def predict(image: Image.Image, city: str, api_key: str):
         )
 
     # Disease prediction
-    arr  = np.array(image.resize((224, 224)).convert("RGB"), dtype="float32") / 255.0
+    arr   = np.array(image.resize((224, 224)).convert("RGB"), dtype="float32") / 255.0
     preds = disease_model.predict(np.expand_dims(arr, 0), verbose=0)[0]
     top_idx  = int(np.argmax(preds))
     top_name = CLASS_NAMES[top_idx]
@@ -112,19 +117,19 @@ def predict(image: Image.Image, city: str, api_key: str):
     is_healthy = "healthy" in top_name.lower()
 
     if is_healthy:
-        plant_name   = top_name.split("___")[0]
-        result_html  = build_healthy_html(plant_name, top_conf, weather_html)
-        voice_text   = f"Good news! Your {plant_name} plant is healthy with {top_conf:.0f} percent confidence."
-        emoji        = "✅"
+        plant_name  = top_name.split("___")[0]
+        result_html = build_healthy_html(plant_name, top_conf, weather_html)
+        voice_text  = f"Good news! Your {plant_name} plant is healthy with {top_conf:.0f} percent confidence."
+        emoji       = "✅"
     else:
-        info         = SIMPLE_INFO.get(top_name, SIMPLE_INFO["default"])
-        sev          = SEVERITY_CONFIG[info["severity"]]
-        timing       = get_treatment_timing(top_name, weather, info["base_days"])
-        result_html  = build_disease_html(
+        info        = SIMPLE_INFO.get(top_name, SIMPLE_INFO["default"])
+        sev         = SEVERITY_CONFIG[info["severity"]]
+        timing      = get_treatment_timing(top_name, weather, info["base_days"])
+        result_html = build_disease_html(
             top_name, top_conf, info,
             sev["label"], sev["emoji"], timing, weather_html
         )
-        voice_text   = (
+        voice_text  = (
             f"Alert! Your plant has {info['simple_name']} with {top_conf:.0f} percent confidence. "
             f"{info['simple_cause']} "
             + " ".join(info["simple_cure_steps"])
@@ -144,13 +149,8 @@ with gr.Blocks(css=CSS, title="🌿 Leaf Disease Predictor") as demo:
     <div class='main-header'>
         <h1>🌿 Leaf Disease Predictor</h1>
         <p>Upload a leaf photo → Get instant disease detection + simple cure guide</p>
-        <p style='font-size:0.85rem;opacity:0.8;'>
-            पत्ती की फोटो डालें → रोग पहचान + इलाज की जानकारी पाएं
-        </p>
     </div>
     """)
-
-    voice_state = gr.State("")
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -196,9 +196,6 @@ with gr.Blocks(css=CSS, title="🌿 Leaf Disease Predictor") as demo:
                     <li>Read the result and follow the <b>step-by-step cure guide</b></li>
                     <li>Click <b>"Read Result Aloud"</b> to hear the result spoken</li>
                 </ol>
-                <div class='hindi-text'>
-                    पत्ती की साफ फोटो लें → "Analyse My Leaf" दबाएं → इलाज की जानकारी पाएं
-                </div>
             </div>
             """)
 
