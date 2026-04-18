@@ -3,13 +3,65 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image
 import requests
-import os
 
 # ==============================================================
 #  MODEL LOADING
 # ==============================================================
 MODEL_PATH = "plant_disease_model_final.h5"
-model = tf.keras.models.load_model(MODEL_PATH)
+disease_model = tf.keras.models.load_model(MODEL_PATH)
+
+# ImageNet classifier for leaf validation
+# MobileNetV2 pretrained on ImageNet - used ONLY to check if image is a plant/leaf
+imagenet_model = tf.keras.applications.MobileNetV2(
+    weights="imagenet", include_top=True, input_shape=(224, 224, 3)
+)
+
+# ImageNet classes that are plant/leaf related (synset indices)
+# These cover: plants, leaves, flowers, vegetables, fruits on trees, etc.
+PLANT_RELATED_KEYWORDS = [
+    "leaf", "plant", "tree", "flower", "herb", "fern", "moss",
+    "vegetable", "cabbage", "broccoli", "cauliflower", "cucumber",
+    "corn", "ear of corn", "artichoke", "mushroom", "fungus",
+    "strawberry", "orange", "lemon", "fig", "pineapple", "banana",
+    "apple", "grape", "pomegranate", "acorn", "hip", "buckeye",
+    "rapeseed", "daisy", "yellow lady", "corn poppy",
+    "pot", "garden", "bud", "petal", "stem", "vine", "shrub",
+]
+
+def is_leaf_image(image: Image.Image) -> tuple:
+    """
+    Uses ImageNet MobileNetV2 to check if image contains a plant/leaf.
+    Returns (is_leaf: bool, reason: str)
+    """
+    img = image.resize((224, 224)).convert("RGB")
+    arr = np.array(img, dtype="float32")
+    arr = tf.keras.applications.mobilenet_v2.preprocess_input(arr)
+    arr = np.expand_dims(arr, 0)
+
+    preds = imagenet_model.predict(arr, verbose=0)
+    decoded = tf.keras.applications.mobilenet_v2.decode_predictions(preds, top=5)[0]
+
+    # Check if any of top-5 ImageNet predictions are plant-related
+    for _, label, confidence in decoded:
+        label_lower = label.lower().replace("_", " ")
+        for keyword in PLANT_RELATED_KEYWORDS:
+            if keyword in label_lower:
+                return True, f"Detected: {label} ({confidence*100:.1f}%)"
+
+    # Also do a green pixel ratio check as secondary signal
+    arr_rgb = np.array(image.resize((100, 100)).convert("RGB"), dtype="float32")
+    R, G, B = arr_rgb[:,:,0], arr_rgb[:,:,1], arr_rgb[:,:,2]
+    green_mask = (G > 60) & (G > R * 0.9) & (G > B * 0.85)
+    green_ratio = np.sum(green_mask) / green_mask.size
+
+    # Very strong green signal can override (e.g., diseased yellow leaf still passes ImageNet check)
+    if green_ratio > 0.35:
+        return True, f"Strong green signal detected ({green_ratio*100:.0f}% green pixels)"
+
+    top_label = decoded[0][1]
+    top_conf = decoded[0][2]
+    return False, f"Detected as: {top_label} ({top_conf*100:.1f}%) - not a plant"
+
 
 # ==============================================================
 #  CLASS NAMES  (38 PlantVillage classes)
@@ -133,28 +185,6 @@ DISEASE_INFO = {
 
 IMG_SIZE = (224, 224)
 
-# ==============================================================
-#  LEAF VALIDATOR
-# Uses green/brown pixel ratio to check if image is a leaf.
-# Non-leaf images (screenshots, blank images, faces, etc.)
-# will be rejected before prediction.
-# ==============================================================
-def is_leaf_image(image: Image.Image) -> bool:
-    img = image.resize((100, 100)).convert("RGB")
-    arr = np.array(img, dtype="float32")
-    R, G, B = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
-
-    # Green dominance: healthy leaves
-    green_dominant = np.logical_and(G > R * 0.8, G > B * 0.8)
-    green_ratio = np.sum(green_dominant) / green_dominant.size
-
-    # Brown/yellow tones: diseased leaves
-    brown_mask = np.logical_and.reduce([R > 80, G > 50, B < 100, R > B])
-    brown_ratio = np.sum(brown_mask) / brown_mask.size
-
-    leaf_score = green_ratio + (brown_ratio * 0.5)
-    return leaf_score > 0.15
-
 
 # ==============================================================
 #  WEATHER HELPER
@@ -201,35 +231,37 @@ def predict(image: Image.Image, city: str, api_key: str):
     if image is None:
         return "Please upload a leaf image.", None
 
-    # --- Leaf check ---
-    if not is_leaf_image(image):
+    # --- Step 1: Check if image is a plant/leaf using ImageNet model ---
+    leaf_ok, leaf_reason = is_leaf_image(image)
+    if not leaf_ok:
         return (
-            "This does not appear to be a plant leaf image.\n\n"
-            "Please upload a clear photo of a plant leaf (e.g., tomato, apple, potato leaf).\n"
-            "Make sure the leaf is the main subject and the image is not a screenshot or unrelated photo."
+            "**This is not a plant leaf image.**\n\n"
+            f"The image was identified as: _{leaf_reason}_\n\n"
+            "Please upload a clear, close-up photo of a plant leaf "
+            "(e.g. tomato leaf, apple leaf, potato leaf)."
         ), None
 
-    # --- Preprocess ---
+    # --- Step 2: Preprocess for disease model ---
     img = image.resize(IMG_SIZE)
     arr = np.array(img, dtype="float32") / 255.0
     if arr.shape[-1] == 4:
         arr = arr[..., :3]
     arr = np.expand_dims(arr, 0)
 
-    preds = model.predict(arr, verbose=0)[0]
+    preds = disease_model.predict(arr, verbose=0)[0]
     top3_idx = np.argsort(preds)[-3:][::-1]
 
-    # --- Confidence check: if model is very uncertain, likely not a leaf ---
+    # --- Step 3: Low confidence = unrecognizable leaf ---
     max_conf = float(preds[top3_idx[0]])
-    if max_conf < 0.40:
+    if max_conf < 0.35:
         return (
-            f"Low confidence ({max_conf*100:.1f}%) - the image may not be a recognizable plant leaf.\n\n"
-            "Please upload a clear, close-up photo of a single plant leaf."
+            f"**Low confidence ({max_conf*100:.1f}%)** - could not confidently identify the leaf disease.\n\n"
+            "Please upload a clearer, well-lit photo of a single plant leaf."
         ), None
 
     # --- Weather ---
     weather = None
-    weather_line = "Weather: not fetched (no city / API key provided)."
+    weather_line = "Weather: not fetched (no city/API key provided)."
     if city.strip() and api_key.strip():
         weather = get_weather(city.strip(), api_key.strip())
         if weather:
@@ -305,7 +337,7 @@ with gr.Blocks(title="Leaf Disease Predictor") as demo:
         """
         ---
         **Note:** Please upload a clear, close-up photo of a single plant leaf.
-        Screenshots, blurry images, or non-leaf images will be rejected.
+        Screenshots, faces, or unrelated images will be rejected automatically.
         """
     )
 
