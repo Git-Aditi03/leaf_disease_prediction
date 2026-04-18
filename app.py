@@ -258,7 +258,7 @@ with gr.Blocks(title="🌿 Leaf Disease Predictor") as demo:
 
         with gr.Column(scale=1):
             text_out = gr.Markdown(label="📋 Result")
-            label_out = gr.Label(num_top_classes=3, label="📊 Top-3 Confidence")
+            label_out = gr.Label(num_top_classes=3, label="📊 Top-3 Confidence", show_label=True)
 
     submit_btn.click(
         fn=predict,
